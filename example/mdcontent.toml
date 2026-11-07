@@ -1,0 +1,28 @@
+title = "mdcontent"
+description = "Documentation for your project."
+content_dir = "docs"
+output_dir = "site"
+base_path = "/"
+accent = "#256e55"
+logo_text = "m"
+# logo = "logo.svg"
+# favicon = "favicon.ico" # Defaults to logo when omitted.
+footer = ""
+# Theme: "system", "light", or "dark".
+theme = "system"
+# Set to false and choose light or dark above for a single fixed theme.
+theme_switcher = true
+# custom_css = "custom.css"
+
+# Content and interface
+language = "en"
+navigation_label = "Documentation"
+search = true
+search_placeholder = "Search documentation"
+# List Markdown paths to choose and order the navigation; omitted pages remain accessible.
+# navigation = ["index.md", "guide.md"]
+# public_dir = "public" # Files are copied to the output root.
+
+# [[header_links]]
+# label = "GitHub"
+# url = "https://github.com/NicDev-Studios/mdcontent"

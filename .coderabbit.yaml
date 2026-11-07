@@ -1,0 +1,22 @@
+language: en-US
+reviews:
+  profile: assertive
+  auto_review:
+    enabled: true
+    auto_incremental_review: true
+    drafts: false
+  auto_approvals:
+    enabled: true
+    max_merge_risk: low
+    overrides:
+      - paths:
+          - ".github/workflows/**"
+          - ".github/dependabot.yml"
+          - ".coderabbit.yaml"
+          - "SECURITY.md"
+        enabled: false
+  path_instructions:
+    - path: "src/**/*.rs"
+      instructions: "Check correctness, filesystem boundaries, URL handling, output escaping, and meaningful regression tests. Prefer small focused functions."
+    - path: ".github/workflows/**"
+      instructions: "Check least privilege, immutable action pins, untrusted input, and release integrity."

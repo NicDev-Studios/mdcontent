@@ -1,0 +1,45 @@
+name: Publish crate
+on:
+  release:
+    types: [published]
+permissions:
+  contents: read
+jobs:
+  publish:
+    if: ${{ !github.event.release.prerelease }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    environment: crates-io
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.release.tag_name }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify release tag and main ancestry
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          python3 - <<'PY'
+          import os, re, tomllib
+          with open('Cargo.toml', 'rb') as manifest:
+              version = tomllib.load(manifest)['package']['version']
+          tag = os.environ['RELEASE_TAG']
+          if not re.fullmatch(r'v[0-9]+\.[0-9]+\.[0-9]+', tag) or tag != 'v' + version:
+              raise SystemExit('Release tag must match the Cargo.toml version, e.g. v1.0.0')
+          PY
+          git merge-base --is-ancestor HEAD origin/main
+      - name: Check and package
+        run: |
+          cargo test --locked --all-targets
+          cargo package --locked
+      - name: Authenticate to crates.io
+        id: auth
+        uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
+      - name: Publish
+        run: cargo publish --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}

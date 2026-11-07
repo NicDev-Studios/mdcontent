@@ -1,0 +1,18 @@
+[package]
+name = "mdcontent"
+version = "0.1.0"
+edition = "2024"
+description = "A small, configurable Markdown documentation generator"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/NicDev-Studios/mdcontent"
+exclude = ["/example/site/", "/.github/"]
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+pulldown-cmark = "0.13"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tiny_http = "0.12"
+toml = "1"
+walkdir = "2"
