@@ -96,5 +96,9 @@ fn rebuild_removes_only_unchanged_generated_files() {
         fs::read_to_string(root.join("site/untracked.txt")).unwrap(),
         "untouched"
     );
+    fs::write(&config, "public_dir = 'site'\n").unwrap();
+    let result = build();
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("must not overlap"));
     fs::remove_dir_all(root).unwrap();
 }

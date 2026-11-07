@@ -30,6 +30,12 @@ pub(crate) fn build(config_path: &Path) -> Result<()> {
     if output == content || output.starts_with(&content) || content.starts_with(&output) {
         bail!("content and output directories must not overlap");
     }
+    if let Some(public) = &c.public_dir {
+        let public = fs::canonicalize(public).context("public directory does not exist")?;
+        if output == public || output.starts_with(&public) || public.starts_with(&output) {
+            bail!("public and output directories must not overlap");
+        }
+    }
     reject_output_symlinks(&output)?;
     let staging = tempfile::tempdir_in(output.parent().context("output has no parent")?)?;
     render(&c, &content, staging.path())?;
