@@ -31,7 +31,15 @@ pub(crate) fn build(config_path: &Path) -> Result<()> {
         bail!("content and output directories must not overlap");
     }
     reject_output_symlinks(&output)?;
-    let pages = load_pages(&content, &c)?;
+    let staging = tempfile::tempdir_in(output.parent().context("output has no parent")?)?;
+    render(&c, &content, staging.path())?;
+    crate::output::publish(staging.path(), &output)?;
+    println!("Built site in {}", output.display());
+    Ok(())
+}
+
+fn render(c: &crate::config::Config, content: &Path, output: &Path) -> Result<()> {
+    let pages = load_pages(content, c)?;
     fs::write(
         output.join("style.css"),
         include_str!("../assets/style.css"),
@@ -54,9 +62,9 @@ pub(crate) fn build(config_path: &Path) -> Result<()> {
             )?,
         )?;
     }
-    let logo_url = copy_icon(c.logo.as_deref(), &output, "logo", &c.base_path)?;
+    let logo_url = copy_icon(c.logo.as_deref(), output, "logo", &c.base_path)?;
     let favicon_url = match c.favicon.as_deref() {
-        Some(path) => copy_icon(Some(path), &output, "favicon", &c.base_path)?,
+        Some(path) => copy_icon(Some(path), output, "favicon", &c.base_path)?,
         None => logo_url.clone(),
     };
     let logo_markup = match logo_url {
@@ -70,7 +78,7 @@ pub(crate) fn build(config_path: &Path) -> Result<()> {
         .map(|url| format!("<link rel=\"icon\" href=\"{}\">", escape(&url)))
         .unwrap_or_default();
     if let Some(public) = &c.public_dir {
-        copy_public(public, &output)?;
+        copy_public(public, output)?;
     }
     let navigation: Vec<&Page> = if c.navigation.is_empty() {
         pages.iter().collect()
@@ -167,7 +175,6 @@ pub(crate) fn build(config_path: &Path) -> Result<()> {
         fs::create_dir_all(&dir)?;
         fs::write(dir.join("index.html"), doc)?;
     }
-    println!("Built {} pages in {}", pages.len(), output.display());
     Ok(())
 }
 fn reject_output_symlinks(output: &Path) -> Result<()> {

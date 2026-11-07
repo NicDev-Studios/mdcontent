@@ -1,6 +1,8 @@
 mod build;
 mod config;
+mod output;
 mod serve;
+mod watch;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -21,7 +23,7 @@ enum Command {
         #[arg(short, long, default_value = "mdcontent.toml")]
         config: PathBuf,
     },
-    /// Build and serve the site locally (re-run after changes).
+    /// Build and serve the site locally with automatic reload.
     Serve {
         #[arg(short, long, default_value = "mdcontent.toml")]
         config: PathBuf,
