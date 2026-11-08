@@ -406,6 +406,15 @@ mod tests {
         let old = digest(&journal.join("0")).unwrap();
         fs::write(output.join("page"), "after").unwrap();
         let new = digest(&output.join("page")).unwrap();
+        let old_manifest = Manifest {
+            version: 2,
+            files: BTreeMap::from([("page".to_string(), old.clone())]),
+        };
+        fs::write(
+            output.join(MANIFEST),
+            serde_json::to_vec(&old_manifest).unwrap(),
+        )
+        .unwrap();
         let state = Journal {
             version: 1,
             changes: vec![Change {
@@ -427,5 +436,9 @@ mod tests {
         recover(output).unwrap();
         assert_eq!(fs::read_to_string(output.join("page")).unwrap(), "before");
         assert!(!journal.exists());
+        let stage = tempfile::tempdir().unwrap();
+        fs::write(stage.path().join("page"), "after").unwrap();
+        publish(stage.path(), output).unwrap();
+        assert_eq!(fs::read_to_string(output.join("page")).unwrap(), "after");
     }
 }
