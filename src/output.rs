@@ -307,6 +307,15 @@ pub(crate) fn publish(stage: &Path, output: &Path) -> Result<()> {
     for name in names {
         let path = output.join(safe_path(&name)?);
         let previous = current(&path)?;
+        if let Some(actual) = &previous {
+            let allowed = next.get(&name) == Some(actual) || old.files.get(&name) == Some(actual);
+            if !allowed {
+                bail!("output changed during build: {}", path.display());
+            }
+        }
+        if removals.contains(&name) && previous.as_ref() != old.files.get(&name) {
+            bail!("output changed during build: {}", path.display());
+        }
         let backup = if previous.is_some() {
             let index = changes.len();
             fs::copy(&path, tmp.path().join(index.to_string()))?;
@@ -320,6 +329,17 @@ pub(crate) fn publish(stage: &Path, output: &Path) -> Result<()> {
             old: previous,
             backup,
         });
+    }
+    for change in &changes {
+        let path = output.join(safe_path(&change.name)?);
+        if current(&path)? != change.old {
+            bail!("output changed during build: {}", path.display());
+        }
+        if let (Some(expected), Some(index)) = (&change.old, change.backup)
+            && digest(&tmp.path().join(index.to_string()))? != *expected
+        {
+            bail!("output changed during backup: {}", path.display());
+        }
     }
     let bytes = serde_json::to_vec(&Manifest {
         version: 2,
