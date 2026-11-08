@@ -149,6 +149,11 @@ fn generated_paths_can_change_between_files_and_directories() {
         String::from_utf8_lossy(&result.stderr)
     );
     assert_eq!(fs::read_to_string(root.join("site/item")).unwrap(), "third");
+    fs::create_dir(root.join("site/user-folder")).unwrap();
+    fs::write(root.join("public/user-folder"), "new file").unwrap();
+    let result = build();
+    assert!(!result.status.success());
+    assert!(root.join("site/user-folder").is_dir());
 }
 
 #[test]

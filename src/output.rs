@@ -269,6 +269,10 @@ pub(crate) fn publish(stage: &Path, output: &Path) -> Result<()> {
             parent = p.parent();
         }
         if dest.is_dir() {
+            let prefix = format!("{name}/");
+            if !old.files.keys().any(|file| file.starts_with(&prefix)) {
+                bail!("output path is an untracked directory: {}", dest.display());
+            }
             for entry in WalkDir::new(&dest).min_depth(1).contents_first(true) {
                 let e = entry?;
                 let key = encode(e.path().strip_prefix(output)?)?;
