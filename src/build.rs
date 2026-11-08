@@ -28,6 +28,20 @@ pub(crate) struct BuiltSite {
 }
 /// Render and publish a site while holding the output-specific build lock.
 pub(crate) fn build(config_path: &Path) -> Result<BuiltSite> {
+    build_inner(config_path, None)
+}
+
+pub(crate) fn build_preview(
+    config_path: &Path,
+    shared: &std::sync::RwLock<crate::watch::State>,
+) -> Result<()> {
+    build_inner(config_path, Some(shared)).map(|_| ())
+}
+
+fn build_inner(
+    config_path: &Path,
+    shared: Option<&std::sync::RwLock<crate::watch::State>>,
+) -> Result<BuiltSite> {
     let c = crate::config::load(config_path)?;
     let content = fs::canonicalize(&c.content_dir).context("content directory does not exist")?;
     fs::create_dir_all(&c.output_dir)?;
@@ -41,12 +55,33 @@ pub(crate) fn build(config_path: &Path) -> Result<BuiltSite> {
             bail!("public and output directories must not overlap");
         }
     }
-    reject_output_symlinks(&output)?;
     let _lock = crate::output::lock(&output)?;
-    crate::output::recover(&output)?;
+    reject_output_symlinks(&output)?;
+    {
+        let _state = shared
+            .map(|s| {
+                s.write()
+                    .map_err(|_| anyhow::anyhow!("preview state unavailable"))
+            })
+            .transpose()?;
+        crate::output::recover(&output)?;
+    }
     let staging = tempfile::tempdir_in(&output)?;
     render(&c, &content, staging.path())?;
-    crate::output::publish(staging.path(), &output)?;
+    {
+        let mut state = shared
+            .map(|s| {
+                s.write()
+                    .map_err(|_| anyhow::anyhow!("preview state unavailable"))
+            })
+            .transpose()?;
+        crate::output::publish(staging.path(), &output)?;
+        if let Some(state) = state.as_mut() {
+            state.root = output.clone();
+            state.base = c.base_path.clone();
+            state.revision += 1;
+        }
+    }
     println!("Built site in {}", output.display());
     Ok(BuiltSite {
         root: output,

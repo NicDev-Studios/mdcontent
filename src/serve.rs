@@ -14,6 +14,13 @@ pub(crate) fn serve(config_path: &Path, address: &str) -> Result<()> {
     let base = built.base;
     let server =
         tiny_http::Server::http(address).map_err(|e| anyhow::anyhow!("starting server: {e}"))?;
+    let session = format!(
+        "{}-{:?}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos()
+    );
     let state = Arc::new(RwLock::new(State {
         root: built.root,
         base: base.clone(),
@@ -39,7 +46,7 @@ pub(crate) fn serve(config_path: &Path, address: &str) -> Result<()> {
             {
                 return Ok((
                     serde_json::to_vec(
-                        &serde_json::json!({"revision": state.revision, "base": state.base}),
+                        &serde_json::json!({"revision": state.revision, "base": state.base, "session": session}),
                     )?,
                     "application/json; charset=utf-8",
                 ));
@@ -76,27 +83,46 @@ pub(crate) fn serve(config_path: &Path, address: &str) -> Result<()> {
             };
             let mut body = fs::read(file)?;
             if mime.starts_with("text/html") {
-                let base = serde_json::to_string(&state.base)?;
-                let script = format!(
-                    "<script>(()=>{{let v={},base={};setInterval(async()=>{{try{{let r=await fetch(location.pathname,{{cache:'no-store',headers:{{'X-Mdcontent-Preview':'revision'}}}});if(!r.ok)return;let x=await r.json();if(x.revision!==v){{let p=location.pathname.startsWith(base)?location.pathname.slice(base.length):'';location.replace(x.base+p+location.search+location.hash)}}}}catch(e){{}}}},1000)}})()</script>",
-                    state.revision, base
-                );
-                if let Some(pos) = body.windows(7).rposition(|part| part == b"</body>") {
-                    body.splice(pos..pos, script.bytes());
-                } else {
-                    body.extend_from_slice(script.as_bytes());
-                }
+                inject_reload(&mut body, &state, &session)?;
             }
             Ok((body, mime))
         })();
-        drop(state);
         let response = match response {
             Ok((body, mime)) => tiny_http::Response::from_data(body)
                 .with_header(tiny_http::Header::from_bytes("Content-Type", mime).unwrap())
                 .with_header(tiny_http::Header::from_bytes("Cache-Control", "no-store").unwrap()),
-            Err(_) => tiny_http::Response::from_string("Not found").with_status_code(404),
+            Err(_) => {
+                let mut body =
+                    b"<!doctype html><title>Not found</title><body>Not found</body>".to_vec();
+                inject_reload(&mut body, &state, &session)?;
+                tiny_http::Response::from_data(body)
+                    .with_status_code(404)
+                    .with_header(
+                        tiny_http::Header::from_bytes("Content-Type", "text/html; charset=utf-8")
+                            .unwrap(),
+                    )
+                    .with_header(
+                        tiny_http::Header::from_bytes("Cache-Control", "no-store").unwrap(),
+                    )
+            }
         };
+        drop(state);
         let _ = request.respond(response);
+    }
+    Ok(())
+}
+
+fn inject_reload(body: &mut Vec<u8>, state: &State, session: &str) -> Result<()> {
+    let base = serde_json::to_string(&state.base)?.replace('<', "\\u003c");
+    let session = serde_json::to_string(session)?.replace('<', "\\u003c");
+    let script = format!(
+        "<script>(()=>{{let v={},base={},session={};setInterval(async()=>{{try{{let r=await fetch(location.pathname,{{cache:'no-store',headers:{{'X-Mdcontent-Preview':'revision'}}}});if(!r.ok)return;let x=await r.json();if(x.revision!==v||x.session!==session){{if(x.base===base)location.reload();else{{let p=location.pathname.startsWith(base)?location.pathname.slice(base.length):'';location.replace(x.base+p+location.search+location.hash)}}}}}}catch(e){{}}}},1000)}})()</script>",
+        state.revision, base, session
+    );
+    if let Some(pos) = body.windows(7).rposition(|part| part == b"</body>") {
+        body.splice(pos..pos, script.bytes());
+    } else {
+        body.extend_from_slice(script.as_bytes());
     }
     Ok(())
 }

@@ -26,12 +26,13 @@ fn get(address: &str, path: &str) -> Option<String> {
     stream.read_to_string(&mut response).ok()?;
     Some(response)
 }
-fn get_revision(address: &str, path: &str) -> String {
-    let mut stream = TcpStream::connect(address).unwrap();
-    write!(stream, "GET {path} HTTP/1.1\r\nHost: localhost\r\nX-Mdcontent-Preview: revision\r\nConnection: close\r\n\r\n").unwrap();
+fn get_revision(address: &str, path: &str) -> Option<String> {
+    let mut stream = TcpStream::connect(address).ok()?;
+    stream.set_read_timeout(Some(Duration::from_secs(2))).ok()?;
+    write!(stream, "GET {path} HTTP/1.1\r\nHost: localhost\r\nX-Mdcontent-Preview: revision\r\nConnection: close\r\n\r\n").ok()?;
     let mut response = String::new();
-    stream.read_to_string(&mut response).unwrap();
-    response
+    stream.read_to_string(&mut response).ok()?;
+    Some(response)
 }
 fn wait_for(mut f: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(12);
@@ -50,12 +51,20 @@ fn verify_reload_script(html: &str) {
     };
     let code = &html[start + 8..];
     let code = &code[..code.find("</script>").unwrap()];
+    let session = code
+        .split("session=")
+        .nth(1)
+        .unwrap()
+        .split(";setInterval")
+        .next()
+        .unwrap();
     let js = format!(
-        r#"let tick, moved='', data={{revision:0,base:'/'}};
-let location={{pathname:'/',search:'?x=1',hash:'#h',replace:p=>moved=p}};
+        r#"let tick, moved='', reloaded=false, data={{revision:0,base:'/',session:'initial'}};
+let location={{pathname:'/',search:'?x=1',hash:'#h',replace:p=>moved=p,reload:()=>reloaded=true}};
 let setInterval=f=>tick=f; let fetch=async()=>({{ok:true,json:async()=>data}});
-eval({});
-(async()=>{{await tick();if(moved)process.exit(1);data={{revision:1,base:'/manual/'}};await tick();if(moved!='/manual/?x=1#h')process.exit(2)}})().catch(()=>process.exit(3));"#,
+data.session={};eval({});
+(async()=>{{await tick();if(moved||reloaded)process.exit(1);data.revision=1;await tick();if(!reloaded)process.exit(4);data={{session:data.session,revision:1,base:'/manual/'}};await tick();if(moved!='/manual/?x=1#h')process.exit(2)}})().catch(()=>process.exit(3));"#,
+        session,
         serde_json::to_string(code).unwrap()
     );
     match Command::new("node").args(["-e", &js]).status() {
@@ -109,10 +118,17 @@ fn preview_rebuilds_and_signals_browser_after_edit_and_delete() {
     fs::write(root.join("docs/index.md"), "# Home\nOther text").unwrap();
     filetime::set_file_mtime(root.join("docs/index.md"), modified).unwrap();
     wait_for(|| get(&address, "/").is_some_and(|r| r.contains("Other text")));
-    assert!(get_revision(&address, "/").contains("\"revision\":1"));
+    assert!(get_revision(&address, "/").is_some_and(|r| r.contains("\"revision\":1")));
     fs::remove_file(root.join("docs/extra.md")).unwrap();
     wait_for(|| get(&address, "/extra/").is_some_and(|r| r.starts_with("HTTP/1.1 404")));
     assert!(!root.join("site/extra/index.html").exists());
+    assert!(
+        get(&address, "/extra/")
+            .unwrap()
+            .contains("X-Mdcontent-Preview")
+    );
+    fs::write(root.join("docs/extra.md"), "# Restored").unwrap();
+    wait_for(|| get(&address, "/extra/").is_some_and(|r| r.contains("Restored")));
     let built = fs::read_to_string(root.join("site/index.html")).unwrap();
     assert!(!built.contains("X-Mdcontent-Preview"));
     let old_page = fs::read(root.join("site/index.html")).unwrap();
@@ -127,7 +143,7 @@ fn preview_rebuilds_and_signals_browser_after_edit_and_delete() {
         "public_dir='public'\nbase_path='/manual/'\n",
     )
     .unwrap();
-    wait_for(|| get_revision(&address, "/").contains("\"base\":\"/manual/\""));
+    wait_for(|| get_revision(&address, "/").is_some_and(|r| r.contains("\"base\":\"/manual/\"")));
     assert!(get(&address, "/manual/").unwrap().contains("Retry works"));
 }
 

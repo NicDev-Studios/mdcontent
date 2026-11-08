@@ -35,16 +35,18 @@ fn add_file(path: &Path, entries: &mut Stamp) {
 pub(crate) fn snapshot(config: &Path, c: &crate::config::Config) -> Stamp {
     let mut entries = Vec::new();
     add_file(config, &mut entries);
-    for root in [Some(&c.content_dir), c.public_dir.as_ref()]
+    for (root, markdown_only) in [(Some(&c.content_dir), true), (c.public_dir.as_ref(), false)]
         .into_iter()
-        .flatten()
+        .filter_map(|(root, markdown_only)| root.map(|root| (root, markdown_only)))
     {
         for entry in WalkDir::new(root)
             .follow_links(false)
             .into_iter()
             .filter_map(Result::ok)
         {
-            if entry.file_type().is_file() {
+            if entry.file_type().is_file()
+                && (!markdown_only || entry.path().extension().is_some_and(|x| x == "md"))
+            {
                 add_file(entry.path(), &mut entries);
             }
         }
@@ -73,15 +75,8 @@ pub(crate) fn spawn(
             if !retry && next == previous {
                 continue;
             }
-            let mut state = match shared.write() {
-                Ok(state) => state,
-                Err(_) => return,
-            };
-            match crate::build::build(&config) {
-                Ok(built) => {
-                    state.root = built.root;
-                    state.base = built.base;
-                    state.revision += 1;
+            match crate::build::build_preview(&config, &shared) {
+                Ok(()) => {
                     previous = next;
                     retry = false;
                     println!("Preview updated");

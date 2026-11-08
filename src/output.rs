@@ -13,13 +13,14 @@ use walkdir::WalkDir;
 const MANIFEST: &str = ".mdcontent-manifest.json";
 const LOCK: &str = ".mdcontent.lock";
 const JOURNAL: &str = ".mdcontent-journal";
+const CLEANUP: &str = ".mdcontent-cleanup";
 #[derive(Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Manifest {
     version: u8,
     files: BTreeMap<String, String>,
 }
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct Change {
     name: String,
     old: Option<String>,
@@ -65,7 +66,7 @@ fn encode(path: &Path) -> Result<String> {
                 .replace('\\', "%5C"),
         );
     }
-    if result.is_empty() || matches!(result[0].as_str(), MANIFEST | LOCK | JOURNAL) {
+    if result.is_empty() || matches!(result[0].as_str(), MANIFEST | LOCK | JOURNAL | CLEANUP) {
         bail!("reserved output path");
     }
     Ok(result.join("/"))
@@ -87,7 +88,7 @@ fn safe_path(name: &str) -> Result<PathBuf> {
         }
         path.push(decoded);
     }
-    if matches!(path.components().next(), Some(Component::Normal(p)) if p == MANIFEST || p == LOCK || p == JOURNAL)
+    if matches!(path.components().next(), Some(Component::Normal(p)) if p == MANIFEST || p == LOCK || p == JOURNAL || p == CLEANUP)
     {
         bail!("reserved output path");
     }
@@ -157,12 +158,39 @@ fn read_manifest(output: &Path) -> Result<Manifest> {
     Ok(manifest)
 }
 fn current(path: &Path) -> Result<Option<String>> {
-    if path.is_file() {
-        Ok(Some(digest(path)?))
-    } else {
-        Ok(None)
+    match fs::symlink_metadata(path) {
+        Ok(m) if m.is_file() => Ok(Some(digest(path)?)),
+        Ok(m) if m.is_dir() => Ok(None),
+        Ok(_) => bail!("unsupported output entry: {}", path.display()),
+        Err(e)
+            if e.kind() == std::io::ErrorKind::NotFound
+                || e.kind() == std::io::ErrorKind::NotADirectory =>
+        {
+            Ok(None)
+        }
+        Err(e) => Err(e.into()),
     }
 }
+
+// On Unix, persist directory entries in addition to file contents. Windows does not
+// expose a portable directory flush through std; file contents are still flushed.
+fn sync_file(path: &Path) -> Result<()> {
+    #[cfg(windows)]
+    let file = fs::OpenOptions::new().write(true).open(path)?;
+    #[cfg(not(windows))]
+    let file = fs::File::open(path)?;
+    file.sync_all()?;
+    Ok(())
+}
+
+fn sync_directory(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    fs::File::open(path)?.sync_all()?;
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
 /// Remove only the internal transaction journal after completion or recovery.
 fn remove_journal(dir: &Path) -> Result<()> {
     for entry in WalkDir::new(dir)
@@ -185,6 +213,10 @@ fn remove_journal(dir: &Path) -> Result<()> {
 }
 /// Restore an interrupted publication, without overwriting files changed afterward.
 pub(crate) fn recover(output: &Path) -> Result<()> {
+    let cleanup = output.join(CLEANUP);
+    if cleanup.exists() {
+        remove_journal(&cleanup)?;
+    }
     let dir = output.join(JOURNAL);
     if !dir.exists() {
         return Ok(());
@@ -195,7 +227,7 @@ pub(crate) fn recover(output: &Path) -> Result<()> {
         bail!("unsupported output recovery journal");
     }
     if fs::read(output.join(MANIFEST)).ok().as_deref() == Some(&journal.new_manifest) {
-        return remove_journal(&dir);
+        return finish_journal(output);
     }
     for change in &journal.changes {
         let path = output.join(safe_path(&change.name)?);
@@ -219,22 +251,78 @@ pub(crate) fn recover(output: &Path) -> Result<()> {
         let path = output.join(safe_path(&change.name)?);
         if path.is_file() && current(&path)? != change.old {
             fs::remove_file(&path)?;
+            sync_directory(path.parent().context("missing parent")?)?;
         }
     }
     for change in &journal.changes {
         if let Some(index) = change.backup {
             let path = output.join(safe_path(&change.name)?);
             if path.is_dir() {
+                let prefix = format!("{}/", change.name);
+                if !journal
+                    .changes
+                    .iter()
+                    .any(|c| c.new.is_some() && c.name.starts_with(&prefix))
+                {
+                    bail!(
+                        "recovery would remove an untracked directory: {}",
+                        path.display()
+                    );
+                }
+                let mut descendants = Vec::new();
+                for entry in WalkDir::new(&path)
+                    .min_depth(1)
+                    .contents_first(true)
+                    .follow_links(false)
+                {
+                    let entry = entry?;
+                    if !entry.file_type().is_dir() {
+                        bail!(
+                            "recovery directory is not empty: {}",
+                            entry.path().display()
+                        );
+                    }
+                    let key = encode(entry.path().strip_prefix(output)?)?;
+                    if !journal
+                        .changes
+                        .iter()
+                        .any(|c| c.new.is_some() && c.name.starts_with(&format!("{key}/")))
+                    {
+                        bail!(
+                            "recovery would remove an untracked directory: {}",
+                            entry.path().display()
+                        );
+                    }
+                    descendants.push(entry.into_path());
+                }
+                for descendant in descendants {
+                    fs::remove_dir(descendant)?;
+                }
                 fs::remove_dir(&path)
                     .with_context(|| format!("recovery directory not empty: {}", path.display()))?;
             }
             if let Some(parent) = path.parent() {
                 fs::create_dir_all(parent)?;
             }
-            fs::copy(dir.join(index.to_string()), path)?;
+            let mut temp =
+                tempfile::NamedTempFile::new_in(path.parent().context("missing parent")?)?;
+            std::io::copy(&mut fs::File::open(dir.join(index.to_string()))?, &mut temp)?;
+            temp.as_file()
+                .set_permissions(fs::metadata(dir.join(index.to_string()))?.permissions())?;
+            temp.as_file().sync_all()?;
+            temp.persist(&path).map_err(|e| e.error)?;
+            sync_directory(path.parent().context("missing parent")?)?;
         }
     }
-    remove_journal(&dir)
+    finish_journal(output)
+}
+
+fn finish_journal(output: &Path) -> Result<()> {
+    let cleanup = output.join(CLEANUP);
+    fs::rename(output.join(JOURNAL), &cleanup)?;
+    sync_directory(output)?;
+    remove_journal(&cleanup)?;
+    sync_directory(output)
 }
 /// Stage a reversible journal before touching any previously generated file.
 pub(crate) fn publish(stage: &Path, output: &Path) -> Result<()> {
@@ -322,7 +410,9 @@ pub(crate) fn publish(stage: &Path, output: &Path) -> Result<()> {
         }
         let backup = if previous.is_some() {
             let index = changes.len();
-            fs::copy(&path, tmp.path().join(index.to_string()))?;
+            let backup = tmp.path().join(index.to_string());
+            fs::copy(&path, &backup)?;
+            sync_file(&backup)?;
             Some(index)
         } else {
             None
@@ -353,18 +443,25 @@ pub(crate) fn publish(stage: &Path, output: &Path) -> Result<()> {
         tmp.path().join("journal.json"),
         serde_json::to_vec(&Journal {
             version: 1,
-            changes,
+            changes: changes.clone(),
             new_manifest: bytes.clone(),
         })?,
     )?;
+    sync_file(&tmp.path().join("journal.json"))?;
+    sync_directory(tmp.path())?;
     let tmp_path = tmp.keep();
-    fs::rename(&tmp_path, output.join(JOURNAL))?;
+    if let Err(error) = fs::rename(&tmp_path, output.join(JOURNAL)) {
+        fs::remove_dir_all(&tmp_path).context("failed to clean up prepared journal")?;
+        return Err(error.into());
+    }
+    sync_directory(output)?;
     let result = (|| -> Result<()> {
         for name in &removals {
             let path = output.join(safe_path(name)?);
-            if path.is_file() {
-                fs::remove_file(&path)?;
+            if current(&path)?.as_ref() != old.files.get(name) {
+                bail!("output changed during publication: {}", path.display());
             }
+            fs::remove_file(&path)?;
         }
         let mut dirs: Vec<_> = dirs.into_iter().collect();
         dirs.sort_by_key(|d| std::cmp::Reverse(d.components().count()));
@@ -380,16 +477,30 @@ pub(crate) fn publish(stage: &Path, output: &Path) -> Result<()> {
             let mut temp = tempfile::NamedTempFile::new_in(
                 dest.parent().context("output path has no parent")?,
             )?;
-            std::io::copy(&mut fs::File::open(stage.join(rel))?, &mut temp)?;
-            temp.persist(dest).map_err(|e| e.error)?;
+            let source = stage.join(rel);
+            std::io::copy(&mut fs::File::open(&source)?, &mut temp)?;
+            temp.as_file()
+                .set_permissions(fs::metadata(source)?.permissions())?;
+            temp.as_file().sync_all()?;
+            let expected = changes
+                .iter()
+                .find(|change| change.name == *name)
+                .context("missing publication record")?;
+            if current(&dest)? != expected.old {
+                bail!("output changed during publication: {}", dest.display());
+            }
+            temp.persist(&dest).map_err(|e| e.error)?;
+            sync_directory(dest.parent().context("missing parent")?)?;
         }
         let mut temp = tempfile::NamedTempFile::new_in(output)?;
         std::io::Write::write_all(&mut temp, &bytes)?;
+        temp.as_file().sync_all()?;
         temp.persist(output.join(MANIFEST)).map_err(|e| e.error)?;
+        sync_directory(output)?;
         Ok(())
     })();
     match result {
-        Ok(()) => remove_journal(&output.join(JOURNAL)),
+        Ok(()) => finish_journal(output),
         Err(e) => {
             recover(output).context("failed to recover interrupted publication")?;
             Err(e)
@@ -444,5 +555,56 @@ mod tests {
         fs::write(stage.path().join("page"), "after").unwrap();
         publish(stage.path(), output).unwrap();
         assert_eq!(fs::read_to_string(output.join("page")).unwrap(), "after");
+    }
+    #[test]
+    fn recovery_preserves_untracked_directories_and_removes_generated_parents() {
+        let root = tempfile::tempdir().unwrap();
+        let output = root.path();
+        let dir = output.join(JOURNAL);
+        fs::create_dir(&dir).unwrap();
+        fs::write(dir.join("0"), "old").unwrap();
+        let old = digest(&dir.join("0")).unwrap();
+        fs::create_dir_all(output.join("item/sub/untracked")).unwrap();
+        fs::write(output.join("item/sub/child"), "new").unwrap();
+        let new = digest(&output.join("item/sub/child")).unwrap();
+        let journal = Journal {
+            version: 1,
+            new_manifest: b"different".to_vec(),
+            changes: vec![
+                Change {
+                    name: "item".into(),
+                    old: Some(old),
+                    new: None,
+                    backup: Some(0),
+                },
+                Change {
+                    name: "item/sub/child".into(),
+                    old: None,
+                    new: Some(new),
+                    backup: None,
+                },
+            ],
+        };
+        fs::write(
+            dir.join("journal.json"),
+            serde_json::to_vec(&journal).unwrap(),
+        )
+        .unwrap();
+        assert!(recover(output).is_err());
+        assert!(output.join("item/sub/untracked").is_dir());
+        fs::remove_dir(output.join("item/sub/untracked")).unwrap();
+        recover(output).unwrap();
+        assert_eq!(fs::read(output.join("item")).unwrap(), b"old");
+    }
+    #[test]
+    fn leftover_cleanup_is_removed_and_name_is_reserved() {
+        let output = tempfile::tempdir().unwrap();
+        let cleanup = output.path().join(CLEANUP);
+        fs::create_dir(&cleanup).unwrap();
+        fs::write(cleanup.join("backup"), "data").unwrap();
+        recover(output.path()).unwrap();
+        assert!(!cleanup.exists());
+        assert!(encode(Path::new(CLEANUP)).is_err());
+        assert!(safe_path(CLEANUP).is_err());
     }
 }

@@ -175,6 +175,17 @@ fn simultaneous_builds_leave_consistent_manifest() {
     let mut second = run("b.toml");
     assert!(first.wait().unwrap().success());
     assert!(second.wait().unwrap().success());
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(root.join("site/.mdcontent-manifest.json")).unwrap())
+            .unwrap();
+    use sha2::{Digest, Sha256};
+    for (name, expected) in manifest["files"].as_object().unwrap() {
+        let actual: String = Sha256::digest(fs::read(root.join("site").join(name)).unwrap())
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        assert_eq!(Some(actual.as_str()), expected.as_str());
+    }
     assert!(run("a.toml").wait().unwrap().success());
 }
 
