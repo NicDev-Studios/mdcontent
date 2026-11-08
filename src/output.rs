@@ -14,6 +14,7 @@ const MANIFEST: &str = ".mdcontent-manifest.json";
 const LOCK: &str = ".mdcontent.lock";
 const JOURNAL: &str = ".mdcontent-journal";
 const CLEANUP: &str = ".mdcontent-cleanup";
+const CLEANUP_OWNER: &str = ".mdcontent-cleanup-owner";
 #[derive(Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Manifest {
@@ -66,7 +67,12 @@ fn encode(path: &Path) -> Result<String> {
                 .replace('\\', "%5C"),
         );
     }
-    if result.is_empty() || matches!(result[0].as_str(), MANIFEST | LOCK | JOURNAL | CLEANUP) {
+    if result.is_empty()
+        || matches!(
+            result[0].as_str(),
+            MANIFEST | LOCK | JOURNAL | CLEANUP | CLEANUP_OWNER
+        )
+    {
         bail!("reserved output path");
     }
     Ok(result.join("/"))
@@ -88,7 +94,7 @@ fn safe_path(name: &str) -> Result<PathBuf> {
         }
         path.push(decoded);
     }
-    if matches!(path.components().next(), Some(Component::Normal(p)) if p == MANIFEST || p == LOCK || p == JOURNAL || p == CLEANUP)
+    if matches!(path.components().next(), Some(Component::Normal(p)) if p == MANIFEST || p == LOCK || p == JOURNAL || p == CLEANUP || p == CLEANUP_OWNER)
     {
         bail!("reserved output path");
     }
@@ -157,6 +163,7 @@ fn read_manifest(output: &Path) -> Result<Manifest> {
     }
     Ok(manifest)
 }
+/// Return the digest of a regular output file, rejecting special entries.
 fn current(path: &Path) -> Result<Option<String>> {
     match fs::symlink_metadata(path) {
         Ok(m) if m.is_file() => Ok(Some(digest(path)?)),
@@ -174,6 +181,7 @@ fn current(path: &Path) -> Result<Option<String>> {
 
 // On Unix, persist directory entries in addition to file contents. Windows does not
 // expose a portable directory flush through std; file contents are still flushed.
+/// Flush file contents before the transaction can modify output.
 fn sync_file(path: &Path) -> Result<()> {
     #[cfg(windows)]
     let file = fs::OpenOptions::new().write(true).open(path)?;
@@ -183,6 +191,7 @@ fn sync_file(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Flush directory entries where the platform exposes that operation.
 fn sync_directory(path: &Path) -> Result<()> {
     #[cfg(unix)]
     fs::File::open(path)?.sync_all()?;
@@ -193,20 +202,35 @@ fn sync_directory(path: &Path) -> Result<()> {
 
 /// Remove only the internal transaction journal after completion or recovery.
 fn remove_journal(dir: &Path) -> Result<()> {
-    for entry in WalkDir::new(dir)
-        .min_depth(1)
-        .contents_first(true)
-        .follow_links(false)
-    {
+    let metadata = dir.join("journal.json");
+    let allowed: BTreeSet<String> = if metadata.exists() {
+        let journal: Journal =
+            serde_json::from_slice(&fs::read(&metadata)?).context("invalid cleanup journal")?;
+        journal
+            .changes
+            .into_iter()
+            .filter_map(|c| c.backup.map(|n| n.to_string()))
+            .collect()
+    } else {
+        BTreeSet::new()
+    };
+    let mut backups = Vec::new();
+    for entry in fs::read_dir(dir)? {
         let entry = entry?;
-        if entry.file_type().is_symlink() {
-            bail!("journal contains a symlink");
+        let name = entry.file_name();
+        if name == "journal.json" {
+            continue;
         }
-        if entry.file_type().is_dir() {
-            fs::remove_dir(entry.path())?;
-        } else {
-            fs::remove_file(entry.path())?;
+        if !entry.file_type()?.is_file() || !name.to_str().is_some_and(|n| allowed.contains(n)) {
+            bail!("unverified cleanup entry: {}", entry.path().display());
         }
+        backups.push(entry.path());
+    }
+    for backup in backups {
+        fs::remove_file(backup)?;
+    }
+    if metadata.exists() {
+        fs::remove_file(metadata)?;
     }
     fs::remove_dir(dir)?;
     Ok(())
@@ -214,8 +238,24 @@ fn remove_journal(dir: &Path) -> Result<()> {
 /// Restore an interrupted publication, without overwriting files changed afterward.
 pub(crate) fn recover(output: &Path) -> Result<()> {
     let cleanup = output.join(CLEANUP);
+    let owner = output.join(CLEANUP_OWNER);
     if cleanup.exists() {
+        let record = fs::read_to_string(&owner).context("unverified cleanup directory")?;
+        let expected = cleanup_digest(&record)?;
+        let metadata = cleanup.join("journal.json");
+        if metadata.exists() && digest(&metadata)? != expected {
+            bail!("cleanup directory does not match its ownership record");
+        }
+        if !metadata.exists() && fs::read_dir(&cleanup)?.next().is_some() {
+            bail!("unverified cleanup contents");
+        }
         remove_journal(&cleanup)?;
+        sync_directory(output)?;
+    }
+    if owner.exists() {
+        cleanup_digest(&fs::read_to_string(&owner)?)?;
+        fs::remove_file(owner)?;
+        sync_directory(output)?;
     }
     let dir = output.join(JOURNAL);
     if !dir.exists() {
@@ -317,15 +357,45 @@ pub(crate) fn recover(output: &Path) -> Result<()> {
     finish_journal(output)
 }
 
+/// Validate the cleanup ownership record and return its journal digest.
+fn cleanup_digest(record: &str) -> Result<&str> {
+    let hash = record
+        .strip_prefix("mdcontent-cleanup-v1:")
+        .context("invalid cleanup ownership record")?;
+    if hash.len() != 64 || !hash.bytes().all(|c| c.is_ascii_hexdigit()) {
+        bail!("invalid cleanup ownership record");
+    }
+    Ok(hash)
+}
+
+/// Mark a completed transaction and remove its owned recovery files.
 fn finish_journal(output: &Path) -> Result<()> {
     let cleanup = output.join(CLEANUP);
+    if cleanup.exists() {
+        bail!("unverified cleanup directory already exists");
+    }
+    let owner = output.join(CLEANUP_OWNER);
+    let mut marker = tempfile::NamedTempFile::new_in(output)?;
+    std::io::Write::write_all(
+        &mut marker,
+        format!(
+            "mdcontent-cleanup-v1:{}",
+            digest(&output.join(JOURNAL).join("journal.json"))?
+        )
+        .as_bytes(),
+    )?;
+    marker.as_file().sync_all()?;
+    marker.persist_noclobber(&owner).map_err(|e| e.error)?;
+    sync_directory(output)?;
     fs::rename(output.join(JOURNAL), &cleanup)?;
     sync_directory(output)?;
     remove_journal(&cleanup)?;
+    sync_directory(output)?;
+    fs::remove_file(owner)?;
     sync_directory(output)
 }
 /// Stage a reversible journal before touching any previously generated file.
-pub(crate) fn publish(stage: &Path, output: &Path) -> Result<()> {
+pub(crate) fn publish(stage: &Path, output: &Path) -> Result<Option<anyhow::Error>> {
     let old = read_manifest(output)?;
     let next = collect(stage)?;
     let mut removals = BTreeSet::new();
@@ -500,7 +570,7 @@ pub(crate) fn publish(stage: &Path, output: &Path) -> Result<()> {
         Ok(())
     })();
     match result {
-        Ok(()) => finish_journal(output),
+        Ok(()) => Ok(finish_journal(output).err()),
         Err(e) => {
             recover(output).context("failed to recover interrupted publication")?;
             Err(e)
@@ -511,6 +581,7 @@ pub(crate) fn publish(stage: &Path, output: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Recover interrupted writes without discarding later user edits.
     #[test]
     fn interrupted_publication_recovers_and_preserves_user_changes() {
         let root = tempfile::tempdir().unwrap();
@@ -556,6 +627,7 @@ mod tests {
         publish(stage.path(), output).unwrap();
         assert_eq!(fs::read_to_string(output.join("page")).unwrap(), "after");
     }
+    /// Preserve untracked directories while restoring replaced files.
     #[test]
     fn recovery_preserves_untracked_directories_and_removes_generated_parents() {
         let root = tempfile::tempdir().unwrap();
@@ -596,15 +668,65 @@ mod tests {
         recover(output).unwrap();
         assert_eq!(fs::read(output.join("item")).unwrap(), b"old");
     }
+    /// Verify cleanup ownership before removing transaction data.
     #[test]
     fn leftover_cleanup_is_removed_and_name_is_reserved() {
         let output = tempfile::tempdir().unwrap();
         let cleanup = output.path().join(CLEANUP);
         fs::create_dir(&cleanup).unwrap();
         fs::write(cleanup.join("backup"), "data").unwrap();
+        assert!(recover(output.path()).is_err());
+        assert!(cleanup.exists());
+        fs::remove_file(cleanup.join("backup")).unwrap();
+        let state = Journal {
+            version: 1,
+            changes: vec![],
+            new_manifest: vec![],
+        };
+        fs::write(
+            cleanup.join("journal.json"),
+            serde_json::to_vec(&state).unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            output.path().join(CLEANUP_OWNER),
+            format!(
+                "mdcontent-cleanup-v1:{}",
+                digest(&cleanup.join("journal.json")).unwrap()
+            ),
+        )
+        .unwrap();
         recover(output.path()).unwrap();
         assert!(!cleanup.exists());
         assert!(encode(Path::new(CLEANUP)).is_err());
         assert!(safe_path(CLEANUP).is_err());
+    }
+    /// Only an owned, empty cleanup directory may be removed during recovery.
+    #[test]
+    fn empty_cleanup_requires_owner() {
+        let output = tempfile::tempdir().unwrap();
+        let cleanup = output.path().join(CLEANUP);
+        fs::create_dir(&cleanup).unwrap();
+        assert!(recover(output.path()).is_err());
+        assert!(cleanup.exists());
+        fs::write(
+            output.path().join(CLEANUP_OWNER),
+            format!("mdcontent-cleanup-v1:{}", "0".repeat(64)),
+        )
+        .unwrap();
+        recover(output.path()).unwrap();
+        assert!(!cleanup.exists());
+    }
+    /// Preserve invalid ownership records and remove a completed orphan record.
+    #[test]
+    fn ownership_record_crash_states() {
+        let output = tempfile::tempdir().unwrap();
+        let owner = output.path().join(CLEANUP_OWNER);
+        fs::write(&owner, "partial").unwrap();
+        assert!(recover(output.path()).is_err());
+        assert_eq!(fs::read_to_string(&owner).unwrap(), "partial");
+        fs::write(&owner, format!("mdcontent-cleanup-v1:{}", "0".repeat(64))).unwrap();
+        recover(output.path()).unwrap();
+        assert!(!owner.exists());
     }
 }

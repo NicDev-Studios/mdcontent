@@ -9,11 +9,13 @@ use std::{
 
 struct Server(Child);
 impl Drop for Server {
+    /// Stop and reap the test preview server.
     fn drop(&mut self) {
         let _ = self.0.kill();
         let _ = self.0.wait();
     }
 }
+/// Request a preview page with a bounded response read.
 fn get(address: &str, path: &str) -> Option<String> {
     let mut stream = TcpStream::connect(address).ok()?;
     stream.set_read_timeout(Some(Duration::from_secs(2))).ok()?;
@@ -26,6 +28,7 @@ fn get(address: &str, path: &str) -> Option<String> {
     stream.read_to_string(&mut response).ok()?;
     Some(response)
 }
+/// Request the preview revision with a bounded response read.
 fn get_revision(address: &str, path: &str) -> Option<String> {
     let mut stream = TcpStream::connect(address).ok()?;
     stream.set_read_timeout(Some(Duration::from_secs(2))).ok()?;
@@ -34,6 +37,7 @@ fn get_revision(address: &str, path: &str) -> Option<String> {
     stream.read_to_string(&mut response).ok()?;
     Some(response)
 }
+/// Wait for a preview condition until the test deadline.
 fn wait_for(mut f: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(12);
     while Instant::now() < deadline {
@@ -45,6 +49,7 @@ fn wait_for(mut f: impl FnMut() -> bool) {
     panic!("preview did not update in time");
 }
 // Execute the actual injected script with mocked browser primitives when Node is available.
+/// Exercise preview polling against mocked browser primitives.
 fn verify_reload_script(html: &str) {
     let Some(start) = html.rfind("<script>(()=>") else {
         panic!("reload script missing")
@@ -59,13 +64,14 @@ fn verify_reload_script(html: &str) {
         .next()
         .unwrap();
     let js = format!(
-        r#"let tick, moved='', reloaded=false, data={{revision:0,base:'/',session:'initial'}};
-let location={{pathname:'/',search:'?x=1',hash:'#h',replace:p=>moved=p,reload:()=>reloaded=true}};
+        r#"let tick, moved='', reloaded=false, documentText='old', serverText='new', data={{revision:0,base:'/',session:'initial'}};
+let location={{pathname:'/',search:'?x=1',hash:'#h',replace:p=>moved=p,reload:()=>{{reloaded=true;documentText=serverText}}}};
 let setInterval=f=>tick=f; let fetch=async()=>({{ok:true,json:async()=>data}});
 data.session={};eval({});
-(async()=>{{await tick();if(moved||reloaded)process.exit(1);data.revision=1;await tick();if(!reloaded)process.exit(4);data={{session:data.session,revision:1,base:'/manual/'}};await tick();if(moved!='/manual/?x=1#h')process.exit(2)}})().catch(()=>process.exit(3));"#,
+(async()=>{{await tick();if(moved||reloaded)process.exit(1);data.session+='-changed';await tick();if(!reloaded||moved)process.exit(5);data.session={};reloaded=false;documentText='old';data.revision=1;await tick();if(!reloaded||documentText!=='new')process.exit(4);data={{session:data.session,revision:1,base:'/manual/'}};await tick();if(moved!='/manual/?x=1#h')process.exit(2)}})().catch(()=>process.exit(3));"#,
         session,
-        serde_json::to_string(code).unwrap()
+        serde_json::to_string(code).unwrap(),
+        session
     );
     match Command::new("node").args(["-e", &js]).status() {
         Ok(status) => assert!(status.success(), "reload script did not respond correctly"),
@@ -75,6 +81,7 @@ data.session={};eval({});
         Err(e) => panic!("failed to run Node: {e}"),
     }
 }
+/// Rebuild preview pages and signal changes to connected clients.
 #[test]
 fn preview_rebuilds_and_signals_browser_after_edit_and_delete() {
     let dir = tempfile::tempdir().unwrap();
@@ -147,6 +154,7 @@ fn preview_rebuilds_and_signals_browser_after_edit_and_delete() {
     assert!(get(&address, "/manual/").unwrap().contains("Retry works"));
 }
 
+/// Resolve project paths relative to the supplied configuration path.
 #[cfg(unix)]
 #[test]
 fn symlinked_config_keeps_project_relative_paths() {

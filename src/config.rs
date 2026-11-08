@@ -30,6 +30,7 @@ pub(crate) struct Config {
     pub(crate) public_dir: Option<PathBuf>,
 }
 impl Default for Config {
+    /// Provide default site configuration.
     fn default() -> Self {
         Self {
             title: "Documentation".into(),
@@ -69,6 +70,7 @@ pub(crate) enum Theme {
     System,
 }
 impl Theme {
+    /// Return the configuration value for this theme.
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Light => "light",
@@ -77,6 +79,7 @@ impl Theme {
         }
     }
 }
+/// Load and validate configuration relative to its file.
 pub(crate) fn load(path: &Path) -> Result<Config> {
     let mut c: Config = toml::from_str(
         &fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?,

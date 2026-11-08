@@ -112,6 +112,7 @@ pub(crate) fn serve(config_path: &Path, address: &str) -> Result<()> {
     Ok(())
 }
 
+/// Insert the preview-only polling script into an HTML response.
 fn inject_reload(body: &mut Vec<u8>, state: &State, session: &str) -> Result<()> {
     let base = serde_json::to_string(&state.base)?.replace('<', "\\u003c");
     let session = serde_json::to_string(session)?.replace('<', "\\u003c");

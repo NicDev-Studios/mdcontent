@@ -31,6 +31,7 @@ enum Command {
         address: String,
     },
 }
+/// Parse command-line options and run the selected command.
 fn main() -> Result<()> {
     match Cli::parse().command {
         Command::Init => build::init(),

@@ -15,6 +15,7 @@ struct Page {
     html: String,
     source: String,
 }
+/// Escape text for HTML attributes and content.
 fn escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -31,6 +32,7 @@ pub(crate) fn build(config_path: &Path) -> Result<BuiltSite> {
     build_inner(config_path, None)
 }
 
+/// Publish a rebuilt preview and update its shared state.
 pub(crate) fn build_preview(
     config_path: &Path,
     shared: &std::sync::RwLock<crate::watch::State>,
@@ -38,6 +40,7 @@ pub(crate) fn build_preview(
     build_inner(config_path, Some(shared)).map(|_| ())
 }
 
+/// Validate inputs, stage output, and coordinate publication.
 fn build_inner(
     config_path: &Path,
     shared: Option<&std::sync::RwLock<crate::watch::State>>,
@@ -68,6 +71,7 @@ fn build_inner(
     }
     let staging = tempfile::tempdir_in(&output)?;
     render(&c, &content, staging.path())?;
+    reject_output_symlinks(&output)?;
     {
         let mut state = shared
             .map(|s| {
@@ -75,11 +79,14 @@ fn build_inner(
                     .map_err(|_| anyhow::anyhow!("preview state unavailable"))
             })
             .transpose()?;
-        crate::output::publish(staging.path(), &output)?;
+        let cleanup_error = crate::output::publish(staging.path(), &output)?;
         if let Some(state) = state.as_mut() {
             state.root = output.clone();
             state.base = c.base_path.clone();
             state.revision += 1;
+        }
+        if let Some(error) = cleanup_error {
+            return Err(error.context("publication committed but journal cleanup failed"));
         }
     }
     println!("Built site in {}", output.display());
@@ -466,6 +473,7 @@ pub(crate) fn init() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Resolve Markdown links relative to the source page.
     #[test]
     fn markdown_links_follow_source_file_location() {
         assert_eq!(

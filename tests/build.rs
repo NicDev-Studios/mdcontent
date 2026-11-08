@@ -4,6 +4,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+/// Build configured navigation and public assets.
 #[test]
 fn build_respects_navigation_search_and_public_assets() {
     let root = std::env::temp_dir().join(format!(
@@ -45,6 +46,7 @@ fn build_respects_navigation_search_and_public_assets() {
     fs::remove_dir_all(root).unwrap();
 }
 
+/// Remove only unchanged generated files on rebuild.
 #[test]
 fn rebuild_removes_only_unchanged_generated_files() {
     let root = std::env::temp_dir().join(format!(
@@ -109,6 +111,7 @@ fn rebuild_removes_only_unchanged_generated_files() {
     fs::remove_dir_all(root).unwrap();
 }
 
+/// Allow safe transitions between generated files and directories.
 #[test]
 fn generated_paths_can_change_between_files_and_directories() {
     let temp = tempfile::tempdir().unwrap();
@@ -156,6 +159,7 @@ fn generated_paths_can_change_between_files_and_directories() {
     assert!(root.join("site/user-folder").is_dir());
 }
 
+/// Serialize concurrent builds and verify their manifest.
 #[test]
 fn simultaneous_builds_leave_consistent_manifest() {
     let temp = tempfile::tempdir().unwrap();
@@ -189,6 +193,7 @@ fn simultaneous_builds_leave_consistent_manifest() {
     assert!(run("a.toml").wait().unwrap().success());
 }
 
+/// Keep literal backslashes distinct from path separators.
 #[cfg(unix)]
 #[test]
 fn public_paths_with_backslashes_remain_distinct() {
