@@ -34,7 +34,7 @@ enum Command {
 fn main() -> Result<()> {
     match Cli::parse().command {
         Command::Init => build::init(),
-        Command::Build { config } => build::build(&config),
+        Command::Build { config } => build::build(&config).map(|_| ()),
         Command::Serve { config, address } => serve::serve(&config, &address),
     }
 }

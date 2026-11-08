@@ -6,19 +6,25 @@ use std::{
     sync::{Arc, RwLock},
 };
 
+/// Serve a local preview and inject reload polling only into preview responses.
 pub(crate) fn serve(config_path: &Path, address: &str) -> Result<()> {
-    crate::build::build(config_path)?;
-    let c = crate::config::load(config_path)?;
-    let root = fs::canonicalize(&c.output_dir)?;
-    let base = c.base_path;
+    let initial = crate::config::load(config_path)?;
+    let baseline = crate::watch::snapshot(config_path, &initial);
+    let built = crate::build::build(config_path)?;
+    let base = built.base;
     let server =
         tiny_http::Server::http(address).map_err(|e| anyhow::anyhow!("starting server: {e}"))?;
     let state = Arc::new(RwLock::new(State {
-        root,
+        root: built.root,
         base: base.clone(),
         revision: 0,
     }));
-    crate::watch::spawn(fs::canonicalize(config_path)?, Arc::clone(&state));
+    crate::watch::spawn(
+        config_path.to_path_buf(),
+        Arc::clone(&state),
+        initial,
+        baseline,
+    );
     println!("Serving http://{address}{base} (watching for changes)");
     for request in server.incoming_requests() {
         let path = request.url().split('?').next().unwrap_or("");
@@ -26,15 +32,21 @@ pub(crate) fn serve(config_path: &Path, address: &str) -> Result<()> {
             .read()
             .map_err(|_| anyhow::anyhow!("preview state unavailable"))?;
         let response = (|| -> Result<(Vec<u8>, &'static str)> {
+            if request
+                .headers()
+                .iter()
+                .any(|h| h.field.equiv("X-Mdcontent-Preview") && h.value.as_str() == "revision")
+            {
+                return Ok((
+                    serde_json::to_vec(
+                        &serde_json::json!({"revision": state.revision, "base": state.base}),
+                    )?,
+                    "application/json; charset=utf-8",
+                ));
+            }
             let path = path
                 .strip_prefix(&state.base)
                 .context("outside base path")?;
-            if path == "__mdcontent_revision" {
-                return Ok((
-                    state.revision.to_string().into_bytes(),
-                    "text/plain; charset=utf-8",
-                ));
-            }
             let relative = Path::new(path);
             if relative
                 .components()
@@ -64,11 +76,10 @@ pub(crate) fn serve(config_path: &Path, address: &str) -> Result<()> {
             };
             let mut body = fs::read(file)?;
             if mime.starts_with("text/html") {
-                let endpoint =
-                    serde_json::to_string(&format!("{}__mdcontent_revision", state.base))?;
+                let base = serde_json::to_string(&state.base)?;
                 let script = format!(
-                    "<script>(()=>{{let v={};setInterval(async()=>{{try{{let r=await fetch({},{{cache:'no-store'}});if(r.ok&&Number(await r.text())!==v)location.reload()}}catch(e){{}}}},1000)}})()</script>",
-                    state.revision, endpoint
+                    "<script>(()=>{{let v={},base={};setInterval(async()=>{{try{{let r=await fetch(location.pathname,{{cache:'no-store',headers:{{'X-Mdcontent-Preview':'revision'}}}});if(!r.ok)return;let x=await r.json();if(x.revision!==v){{let p=location.pathname.startsWith(base)?location.pathname.slice(base.length):'';location.replace(x.base+p+location.search+location.hash)}}}}catch(e){{}}}},1000)}})()</script>",
+                    state.revision, base
                 );
                 if let Some(pos) = body.windows(7).rposition(|part| part == b"</body>") {
                     body.splice(pos..pos, script.bytes());
@@ -78,6 +89,7 @@ pub(crate) fn serve(config_path: &Path, address: &str) -> Result<()> {
             }
             Ok((body, mime))
         })();
+        drop(state);
         let response = match response {
             Ok((body, mime)) => tiny_http::Response::from_data(body)
                 .with_header(tiny_http::Header::from_bytes("Content-Type", mime).unwrap())

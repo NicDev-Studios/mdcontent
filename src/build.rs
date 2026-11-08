@@ -22,7 +22,12 @@ fn escape(s: &str) -> String {
         .replace('"', "&quot;")
         .replace('\'', "&#39;")
 }
-pub(crate) fn build(config_path: &Path) -> Result<()> {
+pub(crate) struct BuiltSite {
+    pub root: std::path::PathBuf,
+    pub base: String,
+}
+/// Render and publish a site while holding the output-specific build lock.
+pub(crate) fn build(config_path: &Path) -> Result<BuiltSite> {
     let c = crate::config::load(config_path)?;
     let content = fs::canonicalize(&c.content_dir).context("content directory does not exist")?;
     fs::create_dir_all(&c.output_dir)?;
@@ -37,13 +42,19 @@ pub(crate) fn build(config_path: &Path) -> Result<()> {
         }
     }
     reject_output_symlinks(&output)?;
-    let staging = tempfile::tempdir_in(output.parent().context("output has no parent")?)?;
+    let _lock = crate::output::lock(&output)?;
+    crate::output::recover(&output)?;
+    let staging = tempfile::tempdir_in(&output)?;
     render(&c, &content, staging.path())?;
     crate::output::publish(staging.path(), &output)?;
     println!("Built site in {}", output.display());
-    Ok(())
+    Ok(BuiltSite {
+        root: output,
+        base: c.base_path,
+    })
 }
 
+/// Generate a complete site in an isolated staging directory.
 fn render(c: &crate::config::Config, content: &Path, output: &Path) -> Result<()> {
     let pages = load_pages(content, c)?;
     fs::write(
@@ -183,6 +194,7 @@ fn render(c: &crate::config::Config, content: &Path, output: &Path) -> Result<()
     }
     Ok(())
 }
+/// Reject links that could redirect publication outside the output directory.
 fn reject_output_symlinks(output: &Path) -> Result<()> {
     for entry in WalkDir::new(output).follow_links(false) {
         let entry = entry?;
@@ -196,6 +208,7 @@ fn reject_output_symlinks(output: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Read Markdown pages and render their safe HTML and search text.
 fn load_pages(content: &Path, c: &crate::config::Config) -> Result<Vec<Page>> {
     let mut files: Vec<_> = WalkDir::new(content)
         .follow_links(false)
@@ -299,6 +312,7 @@ fn load_pages(content: &Path, c: &crate::config::Config) -> Result<Vec<Page>> {
     Ok(pages)
 }
 
+/// Copy configured static files while rejecting links and reserved names.
 fn copy_public(public: &Path, output: &Path) -> Result<()> {
     let public = fs::canonicalize(public).context("public directory does not exist")?;
     if output == public || output.starts_with(&public) || public.starts_with(output) {
@@ -347,6 +361,7 @@ fn copy_public(public: &Path, output: &Path) -> Result<()> {
     }
     Ok(())
 }
+/// Copy a configured icon using a predictable output filename.
 fn copy_icon(path: Option<&Path>, output: &Path, name: &str, base: &str) -> Result<Option<String>> {
     let Some(path) = path else { return Ok(None) };
     let extension = path
@@ -365,6 +380,7 @@ fn copy_icon(path: Option<&Path>, output: &Path, name: &str, base: &str) -> Resu
         .with_context(|| format!("copying {name} from {}", path.display()))?;
     Ok(Some(format!("{base}{filename}")))
 }
+/// Resolve relative Markdown links against their source page.
 fn rewrite_link(dest: &str, source: &Path, base: &str) -> String {
     let split = dest.find(['#', '?']).unwrap_or(dest.len());
     let (path, suffix) = dest.split_at(split);
