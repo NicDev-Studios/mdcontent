@@ -11,7 +11,7 @@ mdcontent init
 mdcontent serve
 ```
 
-Open the local address printed in the terminal. Restart the preview after editing your content.
+Open the local address printed in the terminal. The preview rebuilds and reloads when your content changes.
 
 ## Add pages
 

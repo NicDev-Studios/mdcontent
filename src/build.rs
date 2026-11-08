@@ -15,6 +15,7 @@ struct Page {
     html: String,
     source: String,
 }
+/// Escape text for HTML attributes and content.
 fn escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -22,7 +23,28 @@ fn escape(s: &str) -> String {
         .replace('"', "&quot;")
         .replace('\'', "&#39;")
 }
-pub(crate) fn build(config_path: &Path) -> Result<()> {
+pub(crate) struct BuiltSite {
+    pub root: std::path::PathBuf,
+    pub base: String,
+}
+/// Render and publish a site while holding the output-specific build lock.
+pub(crate) fn build(config_path: &Path) -> Result<BuiltSite> {
+    build_inner(config_path, None)
+}
+
+/// Publish a rebuilt preview and update its shared state.
+pub(crate) fn build_preview(
+    config_path: &Path,
+    shared: &std::sync::RwLock<crate::watch::State>,
+) -> Result<()> {
+    build_inner(config_path, Some(shared)).map(|_| ())
+}
+
+/// Validate inputs, stage output, and coordinate publication.
+fn build_inner(
+    config_path: &Path,
+    shared: Option<&std::sync::RwLock<crate::watch::State>>,
+) -> Result<BuiltSite> {
     let c = crate::config::load(config_path)?;
     let content = fs::canonicalize(&c.content_dir).context("content directory does not exist")?;
     fs::create_dir_all(&c.output_dir)?;
@@ -30,8 +52,53 @@ pub(crate) fn build(config_path: &Path) -> Result<()> {
     if output == content || output.starts_with(&content) || content.starts_with(&output) {
         bail!("content and output directories must not overlap");
     }
+    if let Some(public) = &c.public_dir {
+        let public = fs::canonicalize(public).context("public directory does not exist")?;
+        if output == public || output.starts_with(&public) || public.starts_with(&output) {
+            bail!("public and output directories must not overlap");
+        }
+    }
+    let _lock = crate::output::lock(&output)?;
     reject_output_symlinks(&output)?;
-    let pages = load_pages(&content, &c)?;
+    {
+        let _state = shared
+            .map(|s| {
+                s.write()
+                    .map_err(|_| anyhow::anyhow!("preview state unavailable"))
+            })
+            .transpose()?;
+        crate::output::recover(&output)?;
+    }
+    let staging = tempfile::tempdir_in(&output)?;
+    render(&c, &content, staging.path())?;
+    reject_output_symlinks(&output)?;
+    {
+        let mut state = shared
+            .map(|s| {
+                s.write()
+                    .map_err(|_| anyhow::anyhow!("preview state unavailable"))
+            })
+            .transpose()?;
+        let cleanup_error = crate::output::publish(staging.path(), &output)?;
+        if let Some(state) = state.as_mut() {
+            state.root = output.clone();
+            state.base = c.base_path.clone();
+            state.revision += 1;
+        }
+        if let Some(error) = cleanup_error {
+            return Err(error.context("publication committed but journal cleanup failed"));
+        }
+    }
+    println!("Built site in {}", output.display());
+    Ok(BuiltSite {
+        root: output,
+        base: c.base_path,
+    })
+}
+
+/// Generate a complete site in an isolated staging directory.
+fn render(c: &crate::config::Config, content: &Path, output: &Path) -> Result<()> {
+    let pages = load_pages(content, c)?;
     fs::write(
         output.join("style.css"),
         include_str!("../assets/style.css"),
@@ -54,9 +121,9 @@ pub(crate) fn build(config_path: &Path) -> Result<()> {
             )?,
         )?;
     }
-    let logo_url = copy_icon(c.logo.as_deref(), &output, "logo", &c.base_path)?;
+    let logo_url = copy_icon(c.logo.as_deref(), output, "logo", &c.base_path)?;
     let favicon_url = match c.favicon.as_deref() {
-        Some(path) => copy_icon(Some(path), &output, "favicon", &c.base_path)?,
+        Some(path) => copy_icon(Some(path), output, "favicon", &c.base_path)?,
         None => logo_url.clone(),
     };
     let logo_markup = match logo_url {
@@ -70,7 +137,7 @@ pub(crate) fn build(config_path: &Path) -> Result<()> {
         .map(|url| format!("<link rel=\"icon\" href=\"{}\">", escape(&url)))
         .unwrap_or_default();
     if let Some(public) = &c.public_dir {
-        copy_public(public, &output)?;
+        copy_public(public, output)?;
     }
     let navigation: Vec<&Page> = if c.navigation.is_empty() {
         pages.iter().collect()
@@ -167,9 +234,9 @@ pub(crate) fn build(config_path: &Path) -> Result<()> {
         fs::create_dir_all(&dir)?;
         fs::write(dir.join("index.html"), doc)?;
     }
-    println!("Built {} pages in {}", pages.len(), output.display());
     Ok(())
 }
+/// Reject links that could redirect publication outside the output directory.
 fn reject_output_symlinks(output: &Path) -> Result<()> {
     for entry in WalkDir::new(output).follow_links(false) {
         let entry = entry?;
@@ -183,6 +250,7 @@ fn reject_output_symlinks(output: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Read Markdown pages and render their safe HTML and search text.
 fn load_pages(content: &Path, c: &crate::config::Config) -> Result<Vec<Page>> {
     let mut files: Vec<_> = WalkDir::new(content)
         .follow_links(false)
@@ -286,6 +354,7 @@ fn load_pages(content: &Path, c: &crate::config::Config) -> Result<Vec<Page>> {
     Ok(pages)
 }
 
+/// Copy configured static files while rejecting links and reserved names.
 fn copy_public(public: &Path, output: &Path) -> Result<()> {
     let public = fs::canonicalize(public).context("public directory does not exist")?;
     if output == public || output.starts_with(&public) || public.starts_with(output) {
@@ -334,6 +403,7 @@ fn copy_public(public: &Path, output: &Path) -> Result<()> {
     }
     Ok(())
 }
+/// Copy a configured icon using a predictable output filename.
 fn copy_icon(path: Option<&Path>, output: &Path, name: &str, base: &str) -> Result<Option<String>> {
     let Some(path) = path else { return Ok(None) };
     let extension = path
@@ -352,6 +422,7 @@ fn copy_icon(path: Option<&Path>, output: &Path, name: &str, base: &str) -> Resu
         .with_context(|| format!("copying {name} from {}", path.display()))?;
     Ok(Some(format!("{base}{filename}")))
 }
+/// Resolve relative Markdown links against their source page.
 fn rewrite_link(dest: &str, source: &Path, base: &str) -> String {
     let split = dest.find(['#', '?']).unwrap_or(dest.len());
     let (path, suffix) = dest.split_at(split);
@@ -402,6 +473,7 @@ pub(crate) fn init() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Resolve Markdown links relative to the source page.
     #[test]
     fn markdown_links_follow_source_file_location() {
         assert_eq!(

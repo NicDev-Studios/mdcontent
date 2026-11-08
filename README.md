@@ -13,7 +13,7 @@ mdcontent init
 mdcontent serve
 ```
 
-Open `http://127.0.0.1:3000/`. Run `mdcontent build` to generate `site/` for any static host. The preview server builds once on startup; restart it after editing. Use `--config path/to/mdcontent.toml` to select a configuration file.
+Open `http://127.0.0.1:3000/`. Run `mdcontent build` to generate `site/` for any static host. The preview watches the configuration, Markdown, public assets, logo, favicon and custom CSS, rebuilding and reloading open pages when they change. Use `--config path/to/mdcontent.toml` to select a configuration file.
 
 ## Configuration
 
@@ -28,7 +28,7 @@ Additional options in `mdcontent.toml`:
 - `[[header_links]]`: repeat with `label` and an HTTP(S) URL or absolute site path.
 - `public_dir`: directory whose files are copied to the output root, for example images or downloads. Use `base_path` in URLs when hosting in a subdirectory. Generated filenames and HTML are reserved; symlinks are rejected.
 
-Markdown files in `docs/` become pages. An `index.md` maps to its directory; other files map to a directory of the same name. Filenames and directories use ASCII letters, digits, hyphens and underscores. The first level-one heading supplies the navigation title. Raw HTML in Markdown is omitted. Content assets can be supplied through `public_dir`. The preview does not watch files or remove stale output files: use a dedicated empty output directory for a fresh build. Rebuild into an empty output directory after disabling search to remove any old search index. Only publish content you intend to make public: the search index contains page text.
+Markdown files in `docs/` become pages. An `index.md` maps to its directory; other files map to a directory of the same name. Filenames and directories use ASCII letters, digits, hyphens and underscores. The first level-one heading supplies the navigation title. Raw HTML in Markdown is omitted. Content assets can be supplied through `public_dir`. mdcontent records generated files and their hashes in `.mdcontent-manifest.json`. On a successful rebuild it removes stale files only when they still match the previously generated version; modified or unrelated files are preserved. An untracked or modified file that conflicts with new output stops the build. Existing output from versions without a manifest is only adopted when its contents match; use a new empty output directory if there are conflicts. Builds from before the manifest cannot identify old stale files. Keep the output directory private to mdcontent while a build runs: other programs must not modify it or replace directories with symlinks during publication. The build lock coordinates mdcontent processes only. Recovery after a process interruption uses a journal; durability after a system crash depends on the operating system and filesystem. Only publish content you intend to make public: the search index contains page text.
 
 ## Development
 
